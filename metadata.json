@@ -1,0 +1,6 @@
+{
+  "name": "Inkwell",
+  "description": "Infinite canvas handwritten notes and sketching app with advanced pen styles, precision and object erasers, transformable smart lasso, and customizable paper grids.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
