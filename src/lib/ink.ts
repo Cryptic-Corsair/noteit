@@ -202,14 +202,21 @@ export function strokeInRect(s: Stroke, r: { x0: number; y0: number; x1: number;
 
 /* ---------------- Precision Eraser (Path Trimming / Splitting) ---------------- */
 
-export function splitStrokeByCircle(s: Stroke, cx: number, cy: number, r: number): Stroke[] {
+export function splitStrokeByCapsule(
+  s: Stroke,
+  ex0: number,
+  ey0: number,
+  ex1: number,
+  ey1: number,
+  r: number,
+): Stroke[] {
   const pad = r + s.width / 2;
-  if (
-    cx + pad < s.bounds.x0 ||
-    cx - pad > s.bounds.x1 ||
-    cy + pad < s.bounds.y0 ||
-    cy - pad > s.bounds.y1
-  ) {
+  const minEx = Math.min(ex0, ex1) - pad;
+  const maxEx = Math.max(ex0, ex1) + pad;
+  const minEy = Math.min(ey0, ey1) - pad;
+  const maxEy = Math.max(ey0, ey1) + pad;
+
+  if (minEx > s.bounds.x1 || maxEx < s.bounds.x0 || minEy > s.bounds.y1 || maxEy < s.bounds.y0) {
     return [s]; // no intersection
   }
 
@@ -219,7 +226,7 @@ export function splitStrokeByCircle(s: Stroke, cx: number, cy: number, r: number
 
   for (let i = 0; i < s.pts.length; i++) {
     const p = s.pts[i]!;
-    const dSq = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+    const dSq = distSqToSeg(p.x, p.y, { x: ex0, y: ey0, p: 0 }, { x: ex1, y: ey1, p: 0 });
     if (dSq > rSq) {
       currentPiece.push(p);
     } else {
@@ -234,10 +241,11 @@ export function splitStrokeByCircle(s: Stroke, cx: number, cy: number, r: number
   }
 
   // Filter out tiny disconnected residue dots (< 2 pts and span < 2px)
-  const validPieces = pieces.filter((pts) => {
-    if (pts.length >= 2) return true;
-    return false;
-  });
+  const validPieces = pieces.filter((pts) => pts.length >= 2);
+
+  if (validPieces.length === 1 && validPieces[0]!.length === s.pts.length) {
+    return [s];
+  }
 
   return validPieces.map((pts) => ({
     id: uid(),
@@ -320,6 +328,28 @@ export function flipStroke(s: Stroke, cx: number, cy: number, axis: "h" | "v"): 
 
 /* ---------------- Shape Generators ---------------- */
 
+export function resamplePoints(pts: Pt[], spacing: number = 2): Pt[] {
+  if (pts.length < 2) return pts;
+  const out: Pt[] = [pts[0]!];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i]!;
+    const b = pts[i + 1]!;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    const steps = Math.ceil(dist / spacing);
+    for (let j = 1; j <= steps; j++) {
+      const t = j / steps;
+      out.push({
+        x: a.x + dx * t,
+        y: a.y + dy * t,
+        p: a.p + (b.p - a.p) * t,
+      });
+    }
+  }
+  return out;
+}
+
 export function generateShape(
   type: "line" | "arrow" | "rectangle" | "ellipse",
   start: Pt,
@@ -377,6 +407,8 @@ export function generateShape(
       });
     }
   }
+
+  pts = resamplePoints(pts, 4); // Resample for smooth eraser cutting
 
   return {
     id: uid(),

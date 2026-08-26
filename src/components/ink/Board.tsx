@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Brain } from "lucide-react";
 import {
   brushStyle,
   clamp,
@@ -14,7 +13,7 @@ import {
   rotateStroke,
   scaleStroke,
   shouldAddPoint,
-  splitStrokeByCircle,
+  splitStrokeByCapsule,
   strokeInLasso,
   strokeInRect,
   strokePath,
@@ -38,16 +37,6 @@ import {
 } from "./Toolbar";
 import { THEMES, type ThemeId, type PaperPatternId } from "./palette";
 import { getNote, updateNote } from "@/lib/notes";
-import { analyzeCanvas } from "@/lib/ai";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 
 const pathCache = new WeakMap<Stroke, Path2D>();
 const getCachedPath = (s: Stroke, isLive: boolean) => {
@@ -132,13 +121,6 @@ export function Board({ noteId }: { noteId: string }) {
   const [hasSelection, setHasSelection] = useState(false);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
-
-  // AI Brainstorm states
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiPrompt, setAiPrompt] = useState("");
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiResult, setAiResult] = useState("");
-  const [aiImagePreview, setAiImagePreview] = useState<string | null>(null);
 
   // Sync refs for live event callbacks
   const toolRef = useRef(tool);
@@ -858,7 +840,7 @@ export function Board({ noteId }: { noteId: string }) {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  const eraseAt = (wx: number, wy: number) => {
+  const eraseSegment = (x0: number, y0: number, x1: number, y1: number) => {
     const mode = eraserModeRef.current;
     const filter = eraserFilterRef.current;
     const r = eraserSizeRef.current / camRef.current.k;
@@ -867,14 +849,23 @@ export function Board({ noteId }: { noteId: string }) {
       const kept = strokesRef.current.filter((s) => {
         if (filter === "pen-only" && s.style === "highlighter") return true;
         if (filter === "highlighter-only" && s.style !== "highlighter") return true;
-        return !pointNearStroke(s, wx, wy, r);
+
+        // Approximate capsule intersection by checking a few interpolated points
+        const count = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (r * 0.5)));
+        for (let j = 0; j <= count; j++) {
+          const t = count === 0 ? 0 : j / count;
+          const cx = x0 + (x1 - x0) * t;
+          const cy = y0 + (y1 - y0) * t;
+          if (pointNearStroke(s, cx, cy, r)) return false;
+        }
+        return true;
       });
       if (kept.length !== strokesRef.current.length) {
         strokesRef.current = kept;
         requestDraw();
       }
     } else {
-      // Precision pixel segment splitting
+      // Precision pixel segment splitting (Capsule-based)
       let changed = false;
       const next: Stroke[] = [];
       for (const s of strokesRef.current) {
@@ -885,7 +876,8 @@ export function Board({ noteId }: { noteId: string }) {
           next.push(s);
           continue;
         }
-        const splits = splitStrokeByCircle(s, wx, wy, r);
+
+        const splits = splitStrokeByCapsule(s, x0, y0, x1, y1, r);
         if (splits.length !== 1 || splits[0] !== s) {
           changed = true;
           next.push(...splits);
@@ -1022,8 +1014,8 @@ export function Board({ noteId }: { noteId: string }) {
 
     // Eraser Tool
     if (activeTool === "eraser") {
-      gestureRef.current = { mode: "erase", id: e.pointerId };
-      eraseAt(world.x, world.y);
+      gestureRef.current = { mode: "erase", id: e.pointerId, lastX: x, lastY: y };
+      eraseSegment(world.x, world.y, world.x, world.y);
       return;
     }
 
@@ -1164,7 +1156,10 @@ export function Board({ noteId }: { noteId: string }) {
 
     // Erase
     if (g.mode === "erase") {
-      eraseAt(world.x, world.y);
+      const lastW = toWorld(camRef.current, g.lastX, g.lastY);
+      eraseSegment(lastW.x, lastW.y, world.x, world.y);
+      g.lastX = x;
+      g.lastY = y;
       return;
     }
 
@@ -1525,56 +1520,6 @@ export function Board({ noteId }: { noteId: string }) {
     [title, theme, pattern],
   );
 
-  /* ---------------- AI Brainstorming ---------------- */
-  const handleAskAI = async () => {
-    if (!canvasRef.current) return;
-    const dataUrl = aiImagePreview || canvasRef.current.toDataURL("image/png");
-    setAiLoading(true);
-    setAiResult("");
-    try {
-      const res = await analyzeCanvas({ data: { image: dataUrl, prompt: aiPrompt } });
-      setAiResult(res.text);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      setAiResult("Error: " + (message || "Failed to analyze drawing"));
-    } finally {
-      setAiLoading(false);
-    }
-  };
-
-  const askAIOnSelection = () => {
-    const sel = selectionRef.current;
-    if (sel.size === 0 || !canvasRef.current) return;
-    const selected = strokesRef.current.filter((s) => sel.has(s.id));
-    const bounds = computeGroupBounds(selected);
-    const pad = 20;
-
-    const off = document.createElement("canvas");
-    off.width = Math.max(100, bounds.w + pad * 2);
-    off.height = Math.max(100, bounds.h + pad * 2);
-    const octx = off.getContext("2d");
-    if (!octx) return;
-
-    octx.fillStyle = "#ffffff";
-    octx.fillRect(0, 0, off.width, off.height);
-    octx.translate(-(bounds.x0 - pad), -(bounds.y0 - pad));
-
-    selected.forEach((s) => {
-      octx.save();
-      octx.strokeStyle = brushStyle(octx, s);
-      octx.lineWidth = s.width;
-      octx.globalAlpha = s.opacity ?? 1;
-      const path = strokePath(s.pts);
-      octx.stroke(path);
-      octx.restore();
-    });
-
-    const cropDataUrl = off.toDataURL("image/png");
-    setAiImagePreview(cropDataUrl);
-    setAiPrompt("Explain what is in this selected diagram or solve this part.");
-    setAiOpen(true);
-  };
-
   /* ---------------- Dynamic Cursor ---------------- */
   const cursor = useMemo(() => {
     if (tool === "hand") return "grab";
@@ -1649,12 +1594,6 @@ export function Board({ noteId }: { noteId: string }) {
         onFlipSelection={flipSelection}
         onRotateSelection={rotateSelection}
         onDeselect={deselect}
-        onAskAI={() => {
-          setAiImagePreview(null);
-          setAiPrompt("");
-          setAiOpen(true);
-        }}
-        onAskAISelection={askAIOnSelection}
         onResetView={() => {
           camRef.current = { x: 0, y: 0, k: 1 };
           setZoom(1);
@@ -1672,55 +1611,6 @@ export function Board({ noteId }: { noteId: string }) {
         }}
         onExportImage={exportImage}
       />
-
-      {/* AI Brainstorm Modal Dialog */}
-      <Dialog open={aiOpen} onOpenChange={setAiOpen}>
-        <DialogContent className="sm:max-w-[480px] bg-panel/95 backdrop-blur-2xl border-panel-border text-panel-foreground shadow-2xl rounded-3xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 font-display text-lg">
-              <Brain className="h-5 w-5 text-purple-400" />
-              <span>AI Visual Brainstorm</span>
-            </DialogTitle>
-            <DialogDescription className="text-panel-foreground/60 text-xs">
-              Gemini analyzes your handwriting, formulas, diagrams, or sketches and gives instant
-              answers.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-3 py-2">
-            {aiImagePreview && (
-              <div className="flex items-center gap-2 p-2 rounded-xl bg-panel-accent/50 border border-panel-border">
-                <img
-                  src={aiImagePreview}
-                  alt="Selection preview"
-                  className="h-14 w-20 object-contain rounded-lg bg-white/10"
-                />
-                <div className="text-xs text-panel-foreground/75 font-medium">
-                  Analyzing lassoed selection ({selectionRef.current.size} strokes)
-                </div>
-              </div>
-            )}
-            <Textarea
-              placeholder="E.g., Transcribe my notes, solve this math formula, or give design feedback..."
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              className="resize-none border-panel-border bg-panel-accent/40 text-panel-foreground placeholder:text-panel-foreground/40 rounded-xl"
-              rows={3}
-            />
-            <Button
-              onClick={handleAskAI}
-              disabled={aiLoading}
-              className="rounded-xl bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 font-semibold text-white shadow-md hover:opacity-90"
-            >
-              {aiLoading ? "Gemini is analyzing..." : "Analyze Canvas"}
-            </Button>
-            {aiResult && (
-              <div className="mt-2 rounded-xl bg-panel-accent/60 border border-panel-border p-3.5 text-xs whitespace-pre-wrap text-panel-foreground max-h-60 overflow-y-auto leading-relaxed">
-                {aiResult}
-              </div>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

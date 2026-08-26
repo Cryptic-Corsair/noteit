@@ -14,7 +14,6 @@ import {
   Sparkles,
   X,
   ChevronLeft,
-  Brain,
   Minus,
   MoveRight,
   Square,
@@ -110,8 +109,6 @@ type Props = {
   onFlipSelection: (axis: "h" | "v") => void;
   onRotateSelection: (angleDeg: number) => void;
   onDeselect: () => void;
-  onAskAI: () => void;
-  onAskAISelection: () => void;
   onResetView: () => void;
   onFitView: () => void;
   onClear: () => void;
@@ -384,19 +381,6 @@ export function Toolbar(p: Props) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-
-          <span className="mx-0.5 h-5 w-px bg-panel-border" />
-
-          {/* AI Brainstorm CTA */}
-          <button
-            type="button"
-            onClick={p.onAskAI}
-            aria-label="AI Brainstorm"
-            className="flex h-9 items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-500/20 via-purple-500/20 to-pink-500/20 px-3 text-xs font-semibold text-panel-foreground border border-purple-500/30 transition-all hover:border-purple-500/60 hover:scale-[1.02] active:scale-98 shadow-xs"
-          >
-            <Brain className="h-4 w-4 text-purple-400" />
-            <span className="hidden sm:inline">AI Brainstorm</span>
-          </button>
         </div>
       </header>
 
@@ -472,16 +456,6 @@ export function Toolbar(p: Props) {
               className="grid h-8 w-8 place-items-center rounded-xl text-panel-foreground/80 hover:bg-panel-accent hover:text-panel-foreground transition-colors"
             >
               <RotateCw className="h-3.5 w-3.5" />
-            </button>
-
-            <button
-              type="button"
-              onClick={p.onAskAISelection}
-              title="AI analyze this selection only"
-              className="flex items-center gap-1 rounded-xl bg-purple-500/15 px-2.5 py-1.5 text-xs font-medium text-purple-300 hover:bg-purple-500/25 transition-colors"
-            >
-              <Brain className="h-3.5 w-3.5" />
-              <span>Ask AI</span>
             </button>
 
             <span className="mx-0.5 h-4 w-px bg-panel-border" />
