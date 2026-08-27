@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Pen,
   Highlighter,
@@ -33,6 +33,12 @@ import {
   Check,
   FileCode,
   Image as ImageIcon,
+  Flame,
+  PenTool,
+  HelpCircle,
+  Maximize2,
+  Minimize2,
+  Grid3X3,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { Brush, StrokeStyle } from "@/lib/ink";
@@ -55,11 +61,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-export type Tool = "pen" | "eraser" | "lasso" | "hand" | "shape";
+export type Tool = "pen" | "eraser" | "lasso" | "hand" | "shape" | "laser";
 export type EraserMode = "stroke" | "precision";
 export type EraserFilter = "all" | "pen-only" | "highlighter-only";
 export type LassoMode = "freehand" | "rect";
 export type ShapeType = "line" | "arrow" | "rectangle" | "ellipse";
+export type GridDensity = "fine" | "normal" | "wide";
 
 type Props = {
   title: string;
@@ -83,6 +90,8 @@ type Props = {
   setShapeType: (s: ShapeType) => void;
   autoSnapShape: boolean;
   setAutoSnapShape: (b: boolean) => void;
+  stylusOnly: boolean;
+  setStylusOnly: (b: boolean) => void;
   // Appearance
   brush: Brush;
   setBrush: (b: Brush) => void;
@@ -94,8 +103,12 @@ type Props = {
   setTheme: (t: ThemeId) => void;
   pattern: PaperPatternId;
   setPattern: (p: PaperPatternId) => void;
+  gridDensity: GridDensity;
+  setGridDensity: (d: GridDensity) => void;
   zoom: number;
   setZoomLevel: (z: number) => void;
+  isZenMode: boolean;
+  setIsZenMode: (b: boolean) => void;
   // Actions
   canUndo: boolean;
   canRedo: boolean;
@@ -104,6 +117,8 @@ type Props = {
   onRedo: () => void;
   onDeleteSelection: () => void;
   onDuplicateSelection: () => void;
+  onCopySelection: () => void;
+  onCutSelection: () => void;
   onRecolorSelection: () => void;
   onThickenSelection: (delta: number) => void;
   onFlipSelection: (axis: "h" | "v") => void;
@@ -113,6 +128,7 @@ type Props = {
   onFitView: () => void;
   onClear: () => void;
   onExportImage: (format: "png" | "svg" | "json") => void;
+  onOpenShortcuts: () => void;
 };
 
 const PEN_STYLES: { id: StrokeStyle; label: string; icon: typeof Pen; desc: string }[] = [
@@ -152,13 +168,45 @@ export function Toolbar(p: Props) {
   >(null);
   const [customFrom, setCustomFrom] = useState("#6366f1");
   const [customTo, setCustomTo] = useState("#ec4899");
+  const [customSolid, setCustomSolid] = useState(
+    p.brush.kind === "solid" ? p.brush.color : "#6366f1",
+  );
+  const [customHexInput, setCustomHexInput] = useState(
+    p.brush.kind === "solid" ? p.brush.color : "#6366f1",
+  );
+  const [recentColors, setRecentColors] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem("inkwell_recent_colors");
+      return saved ? JSON.parse(saved) : ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
+    } catch {
+      return ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
+    }
+  });
+
+  const addRecentColor = (color: string) => {
+    setRecentColors((prev) => {
+      const filtered = prev.filter((c) => c.toLowerCase() !== color.toLowerCase());
+      const next = [color, ...filtered].slice(0, 8);
+      try {
+        localStorage.setItem("inkwell_recent_colors", JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
 
   const closePanel = () => setActivePanel(null);
 
   return (
     <>
       {/* Top Floating Glass Bar */}
-      <header className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-3 sm:p-4">
+      <header
+        className={cn(
+          "pointer-events-none absolute inset-x-0 top-0 z-30 flex items-start justify-between gap-2 p-3 sm:p-4 transition-all duration-300",
+          p.isZenMode && "-translate-y-20 opacity-0 hover:translate-y-0 hover:opacity-100",
+        )}
+      >
         {/* Left Island: Back + Title + Status */}
         <div className="pointer-events-auto flex items-center gap-2 rounded-2xl border border-panel-border bg-panel/85 p-1.5 shadow-float backdrop-blur-xl transition-all">
           <Link
@@ -196,7 +244,7 @@ export function Toolbar(p: Props) {
           </div>
         </div>
 
-        {/* Right Island: History + Zoom + View + Themes + Export + AI */}
+        {/* Right Island: History + Zoom + View + Themes + Export + Modes */}
         <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-panel-border bg-panel/85 p-1.5 shadow-float backdrop-blur-xl">
           {/* Undo / Redo */}
           <button
@@ -228,13 +276,33 @@ export function Toolbar(p: Props) {
 
           <span className="mx-0.5 h-5 w-px bg-panel-border" />
 
+          {/* Stylus Palm Rejection Mode Toggle */}
+          <button
+            type="button"
+            aria-label="Stylus Only Palm Rejection"
+            title={
+              p.stylusOnly
+                ? "Stylus-Only Mode ON (Touch pans, stylus inks)"
+                : "Stylus-Only Mode OFF (Touch & pen both draw)"
+            }
+            onClick={() => p.setStylusOnly(!p.stylusOnly)}
+            className={cn(
+              "grid h-9 w-9 place-items-center rounded-xl text-xs font-semibold transition-all",
+              p.stylusOnly
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-panel-foreground/75 hover:bg-panel-accent hover:text-panel-foreground",
+            )}
+          >
+            <PenTool className="h-4 w-4" />
+          </button>
+
           {/* Zoom Control Dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
                 aria-label="Zoom options"
-                className="flex h-9 items-center gap-1 rounded-xl px-2.5 text-xs font-semibold tabular-nums text-panel-foreground/80 transition-colors hover:bg-panel-accent hover:text-panel-foreground"
+                className="flex h-9 items-center gap-1 rounded-xl px-2 text-xs font-semibold tabular-nums text-panel-foreground/80 transition-colors hover:bg-panel-accent hover:text-panel-foreground"
               >
                 <span>{Math.round(p.zoom * 100)}%</span>
                 <ChevronDown className="h-3 w-3 opacity-60" />
@@ -268,7 +336,7 @@ export function Toolbar(p: Props) {
               <DropdownMenuSeparator className="bg-panel-border" />
               <DropdownMenuItem onClick={p.onFitView} className="gap-2">
                 <Crosshair className="h-4 w-4" />
-                <span>Fit All Content</span>
+                <span>Fit All Content (F)</span>
               </DropdownMenuItem>
               <DropdownMenuItem onClick={p.onResetView} className="gap-2">
                 <RotateCw className="h-4 w-4" />
@@ -279,7 +347,7 @@ export function Toolbar(p: Props) {
 
           <span className="mx-0.5 h-5 w-px bg-panel-border" />
 
-          {/* Paper Pattern & Theme Dropdown */}
+          {/* Paper Pattern, Density & Theme Dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -293,7 +361,7 @@ export function Toolbar(p: Props) {
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
-              className="w-56 bg-panel/95 backdrop-blur-2xl border-panel-border text-panel-foreground p-2"
+              className="w-60 bg-panel/95 backdrop-blur-2xl border-panel-border text-panel-foreground p-2"
             >
               <p className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-panel-foreground/40">
                 Paper Grid Pattern
@@ -314,6 +382,37 @@ export function Toolbar(p: Props) {
                   </button>
                 ))}
               </div>
+
+              {p.pattern !== "blank" && (
+                <>
+                  <p className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-panel-foreground/40">
+                    Grid Spacing Density
+                  </p>
+                  <div className="grid grid-cols-3 gap-1 mb-2">
+                    {(
+                      [
+                        { id: "fine", label: "Fine" },
+                        { id: "normal", label: "Standard" },
+                        { id: "wide", label: "Wide" },
+                      ] as const
+                    ).map((gd) => (
+                      <button
+                        key={gd.id}
+                        type="button"
+                        onClick={() => p.setGridDensity(gd.id)}
+                        className={cn(
+                          "py-1.5 rounded-lg text-xs font-medium border border-panel-border transition-colors text-center",
+                          p.gridDensity === gd.id
+                            ? "bg-panel-accent ring-1 ring-panel-ring font-semibold text-panel-foreground"
+                            : "hover:bg-panel-accent/50 text-panel-foreground/75",
+                        )}
+                      >
+                        {gd.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
 
               <DropdownMenuSeparator className="bg-panel-border" />
               <p className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-panel-foreground/40">
@@ -381,6 +480,35 @@ export function Toolbar(p: Props) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+
+          <span className="mx-0.5 h-5 w-px bg-panel-border" />
+
+          {/* Keyboard Shortcuts Button */}
+          <button
+            type="button"
+            aria-label="Keyboard Shortcuts"
+            title="Keyboard Shortcuts (?)"
+            onClick={p.onOpenShortcuts}
+            className="grid h-9 w-9 place-items-center rounded-xl text-panel-foreground/75 transition-colors hover:bg-panel-accent hover:text-panel-foreground"
+          >
+            <HelpCircle className="h-4 w-4" />
+          </button>
+
+          {/* Zen Mode / Fullscreen Toggle */}
+          <button
+            type="button"
+            aria-label="Zen Mode"
+            title={p.isZenMode ? "Exit Zen Mode (Esc)" : "Zen Fullscreen Mode"}
+            onClick={() => p.setIsZenMode(!p.isZenMode)}
+            className={cn(
+              "grid h-9 w-9 place-items-center rounded-xl transition-colors",
+              p.isZenMode
+                ? "bg-panel-accent text-primary"
+                : "text-panel-foreground/75 hover:bg-panel-accent hover:text-panel-foreground",
+            )}
+          >
+            {p.isZenMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
         </div>
       </header>
 
@@ -409,7 +537,7 @@ export function Toolbar(p: Props) {
               title="Thicken stroke width"
               className="rounded-xl px-2 py-1.5 text-xs font-medium text-panel-foreground hover:bg-panel-accent transition-colors"
             >
-              + Thickness
+              + Size
             </button>
             <button
               type="button"
@@ -417,15 +545,35 @@ export function Toolbar(p: Props) {
               title="Reduce stroke width"
               className="rounded-xl px-2 py-1.5 text-xs font-medium text-panel-foreground hover:bg-panel-accent transition-colors"
             >
-              - Thickness
+              - Size
             </button>
 
             <span className="mx-0.5 h-4 w-px bg-panel-border" />
 
             <button
               type="button"
+              onClick={p.onCopySelection}
+              title="Copy selection (⌘C)"
+              className="flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-medium text-panel-foreground/80 hover:bg-panel-accent hover:text-panel-foreground transition-colors"
+            >
+              <Copy className="h-3.5 w-3.5" />
+              <span>Copy</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={p.onCutSelection}
+              title="Cut selection (⌘X)"
+              className="flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs font-medium text-panel-foreground/80 hover:bg-panel-accent hover:text-panel-foreground transition-colors"
+            >
+              <Scissors className="h-3.5 w-3.5" />
+              <span>Cut</span>
+            </button>
+
+            <button
+              type="button"
               onClick={p.onDuplicateSelection}
-              title="Duplicate selection"
+              title="Duplicate selection (⌘D)"
               className="grid h-8 w-8 place-items-center rounded-xl text-panel-foreground/80 hover:bg-panel-accent hover:text-panel-foreground transition-colors"
             >
               <Copy className="h-3.5 w-3.5" />
@@ -472,7 +620,7 @@ export function Toolbar(p: Props) {
             <button
               type="button"
               onClick={p.onDeselect}
-              title="Deselect"
+              title="Deselect (Esc)"
               className="grid h-8 w-8 place-items-center rounded-xl text-panel-foreground/60 hover:bg-panel-accent hover:text-panel-foreground transition-colors"
             >
               <X className="h-3.5 w-3.5" />
@@ -794,9 +942,44 @@ export function Toolbar(p: Props) {
               <div className="space-y-4">
                 {/* Solid Swatches */}
                 <div>
-                  <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-panel-foreground/45">
-                    Solid Colors
-                  </p>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-panel-foreground/45">
+                      Solid Colors
+                    </p>
+                    {/* Custom Hex / Color input */}
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="color"
+                        value={customSolid}
+                        aria-label="Custom solid color picker"
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCustomSolid(val);
+                          setCustomHexInput(val);
+                          p.setBrush({ kind: "solid", color: val });
+                          addRecentColor(val);
+                        }}
+                        className="h-6 w-6 cursor-pointer rounded-md border border-panel-border bg-transparent p-0"
+                      />
+                      <input
+                        type="text"
+                        value={customHexInput}
+                        placeholder="#6366f1"
+                        aria-label="Hex color code"
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCustomHexInput(val);
+                          if (/^#([0-9A-Fa-f]{3}){1,2}$/.test(val)) {
+                            setCustomSolid(val);
+                            p.setBrush({ kind: "solid", color: val });
+                            addRecentColor(val);
+                          }
+                        }}
+                        className="w-20 rounded-md border border-panel-border bg-panel-accent/50 px-2 py-0.5 font-mono text-xs text-panel-foreground outline-none uppercase"
+                      />
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-8 gap-1.5">
                     {SOLID_COLORS.map((c) => {
                       const active = p.brush.kind === "solid" && p.brush.color === c;
@@ -805,7 +988,12 @@ export function Toolbar(p: Props) {
                           key={c}
                           type="button"
                           aria-label={`Color ${c}`}
-                          onClick={() => p.setBrush({ kind: "solid", color: c })}
+                          onClick={() => {
+                            p.setBrush({ kind: "solid", color: c });
+                            setCustomSolid(c);
+                            setCustomHexInput(c);
+                            addRecentColor(c);
+                          }}
                           className={cn(
                             "h-7 rounded-lg border border-panel-border transition-transform hover:scale-110",
                             active &&
@@ -817,6 +1005,38 @@ export function Toolbar(p: Props) {
                     })}
                   </div>
                 </div>
+
+                {/* Recent Inks */}
+                {recentColors.length > 0 && (
+                  <div>
+                    <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-panel-foreground/45">
+                      Recent Inks
+                    </p>
+                    <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                      {recentColors.map((c) => {
+                        const active =
+                          p.brush.kind === "solid" &&
+                          p.brush.color.toLowerCase() === c.toLowerCase();
+                        return (
+                          <button
+                            key={c}
+                            type="button"
+                            onClick={() => {
+                              p.setBrush({ kind: "solid", color: c });
+                              setCustomSolid(c);
+                              setCustomHexInput(c);
+                            }}
+                            className={cn(
+                              "h-6 w-6 rounded-md border border-panel-border transition-transform hover:scale-110 shrink-0",
+                              active && "ring-2 ring-panel-ring ring-offset-1 scale-105",
+                            )}
+                            style={{ background: c }}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Highlighter Swatches */}
                 <div>
@@ -974,7 +1194,10 @@ export function Toolbar(p: Props) {
       {/* Main Ergonomic Floating Bottom Tool Dock */}
       <nav
         aria-label="Drawing tools"
-        className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-3 sm:p-5"
+        className={cn(
+          "pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-3 sm:p-5 transition-all duration-300",
+          p.isZenMode && "translate-y-24 opacity-0 hover:translate-y-0 hover:opacity-100",
+        )}
       >
         <div className="pointer-events-auto flex items-center gap-1 rounded-3xl border border-panel-border bg-panel/90 p-1.5 shadow-2xl backdrop-blur-2xl">
           {/* Pen Group Button */}
@@ -1132,6 +1355,25 @@ export function Toolbar(p: Props) {
               <ChevronDown className="h-3 w-3" />
             </button>
           </div>
+
+          {/* Laser Pointer (Presentation Mode) */}
+          <button
+            type="button"
+            aria-label="Laser pointer"
+            title="Laser Pointer Trail (Presentation / temporary spotlight)"
+            onClick={() => {
+              p.setTool("laser");
+              closePanel();
+            }}
+            className={cn(
+              "grid h-11 w-11 place-items-center rounded-2xl text-panel-foreground/75 transition-all",
+              p.tool === "laser"
+                ? "bg-rose-500 text-white shadow-md scale-102"
+                : "hover:bg-panel-accent hover:text-panel-foreground",
+            )}
+          >
+            <Flame className="h-[18px] w-[18px]" />
+          </button>
 
           {/* Hand / Pan Tool Button */}
           <button

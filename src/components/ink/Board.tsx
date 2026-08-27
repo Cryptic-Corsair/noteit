@@ -37,9 +37,11 @@ import {
   type EraserFilter,
   type LassoMode,
   type ShapeType,
+  type GridDensity,
 } from "./Toolbar";
 import { THEMES, type ThemeId, type PaperPatternId } from "./palette";
 import { getNote, updateNote } from "@/lib/notes";
+import { ShortcutsModal } from "./ShortcutsModal";
 
 const pathCache = new WeakMap<Stroke, Path2D>();
 const getCachedPath = (s: Stroke, isLive: boolean) => {
@@ -64,13 +66,16 @@ export function Board({ noteId }: { noteId: string }) {
   const lassoRef = useRef<Pt[] | null>(null);
   const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const selectionRef = useRef<Set<string>>(new Set());
+  const clipboardRef = useRef<Stroke[]>([]);
   const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const mousePosRef = useRef<{ x: number; y: number } | null>(null);
+  const laserPtsRef = useRef<{ x: number; y: number; t: number }[]>([]);
 
   // Gesture state machine
   const gestureRef = useRef<
     | { mode: "none" }
     | { mode: "draw"; id: number }
+    | { mode: "laser"; id: number }
     | { mode: "shape"; id: number; start: Pt }
     | { mode: "erase"; id: number }
     | { mode: "lasso"; id: number }
@@ -109,17 +114,27 @@ export function Board({ noteId }: { noteId: string }) {
   const [lassoMode, setLassoMode] = useState<LassoMode>("freehand");
   const [shapeType, setShapeType] = useState<ShapeType>("line");
   const [autoSnapShape, setAutoSnapShape] = useState(false);
+  const [stylusOnly, setStylusOnly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("inkwell_stylus_only") === "true";
+    } catch {
+      return false;
+    }
+  });
 
-  // Style states
+  // Style & Canvas states
   const [brush, setBrush] = useState<Brush>({ kind: "solid", color: "#111318" });
   const [size, setSize] = useState(4);
   const [opacity, setOpacity] = useState(1);
   const [theme, setTheme] = useState<ThemeId>("graphite");
   const [pattern, setPattern] = useState<PaperPatternId>("dots");
+  const [gridDensity, setGridDensity] = useState<GridDensity>("normal");
   const [title, setTitle] = useState("Untitled note");
   const [zoom, setZoom] = useState(1);
   const [isSaving, setIsSaving] = useState(false);
   const [strokeCount, setStrokeCount] = useState(0);
+  const [isZenMode, setIsZenMode] = useState(false);
+  const [showShortcutsModal, setShowShortcutsModal] = useState(false);
 
   // Selection & History states
   const [hasSelection, setHasSelection] = useState(false);
@@ -138,6 +153,7 @@ export function Board({ noteId }: { noteId: string }) {
   const brushRef = useRef(brush);
   const sizeRef = useRef(size);
   const opacityRef = useRef(opacity);
+  const stylusOnlyRef = useRef(stylusOnly);
 
   toolRef.current = tool;
   penStyleRef.current = penStyle;
@@ -150,6 +166,16 @@ export function Board({ noteId }: { noteId: string }) {
   brushRef.current = brush;
   sizeRef.current = size;
   opacityRef.current = opacity;
+  stylusOnlyRef.current = stylusOnly;
+
+  const handleSetStylusOnly = (val: boolean) => {
+    setStylusOnly(val);
+    try {
+      localStorage.setItem("inkwell_stylus_only", String(val));
+    } catch {
+      // ignore
+    }
+  };
 
   /* ---------------- Rendering ---------------- */
   const draw = useCallback(() => {
@@ -185,8 +211,12 @@ export function Board({ noteId }: { noteId: string }) {
     const viewY1 = viewY0 + h / cam.k;
 
     // --- Paper Grid Patterns (High-Precision World Coordinates) ---
+    let densityMultiplier = 1;
+    if (gridDensity === "fine") densityMultiplier = 0.65;
+    if (gridDensity === "wide") densityMultiplier = 1.5;
+
     if (pattern === "dots") {
-      let step = 32;
+      let step = Math.round(32 * densityMultiplier);
       while (step * cam.k < 18) step *= 2;
       while (step * cam.k > 80) step /= 2;
 
@@ -208,7 +238,7 @@ export function Board({ noteId }: { noteId: string }) {
       ctx.fill();
       ctx.restore();
     } else if (pattern === "graph") {
-      let step = 32;
+      let step = Math.round(32 * densityMultiplier);
       while (step * cam.k < 16) step *= 2;
       while (step * cam.k > 80) step /= 2;
 
@@ -252,7 +282,7 @@ export function Board({ noteId }: { noteId: string }) {
       ctx.stroke();
       ctx.restore();
     } else if (pattern === "ruled") {
-      let step = 32;
+      let step = Math.round(32 * densityMultiplier);
       while (step * cam.k < 18) step *= 2;
       while (step * cam.k > 80) step /= 2;
 
@@ -278,7 +308,7 @@ export function Board({ noteId }: { noteId: string }) {
       ctx.stroke();
       ctx.restore();
     } else if (pattern === "isometric") {
-      let step = 36;
+      let step = Math.round(36 * densityMultiplier);
       while (step * cam.k < 20) step *= 2;
       while (step * cam.k > 90) step /= 2;
 
@@ -484,6 +514,51 @@ export function Board({ noteId }: { noteId: string }) {
       }
     }
 
+    // Draw Laser Pointer Trail (World Space)
+    const laserPts = laserPtsRef.current;
+    const now = performance.now();
+    laserPtsRef.current = laserPts.filter((p) => now - p.t < 1100);
+    const activeLaser = laserPtsRef.current;
+
+    if (activeLaser.length > 0) {
+      ctx.save();
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      for (let i = 1; i < activeLaser.length; i++) {
+        const p0 = activeLaser[i - 1]!;
+        const p1 = activeLaser[i]!;
+        const age = now - p1.t;
+        const progress = 1 - clamp(age / 1100, 0, 1);
+
+        // Outer neon laser glow
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.strokeStyle = `rgba(244, 63, 94, ${progress * 0.75})`;
+        ctx.lineWidth = (7 / cam.k) * progress;
+        ctx.stroke();
+
+        // Inner bright laser core
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${progress * 0.95})`;
+        ctx.lineWidth = (2.5 / cam.k) * progress;
+        ctx.stroke();
+      }
+
+      const tip = activeLaser[activeLaser.length - 1]!;
+      ctx.beginPath();
+      ctx.arc(tip.x, tip.y, 4.5 / cam.k, 0, Math.PI * 2);
+      ctx.fillStyle = "#ff0055";
+      ctx.fill();
+      ctx.restore();
+
+      // Trigger continuous loop while laser trails are fading
+      requestAnimationFrame(draw);
+    }
+
     ctx.restore();
 
     // Draw Live Eraser Ring & Precision Indicator (Screen Space)
@@ -514,7 +589,7 @@ export function Board({ noteId }: { noteId: string }) {
 
       ctx.restore();
     }
-  }, [pattern]);
+  }, [pattern, gridDensity]);
 
   const requestDraw = useCallback(() => {
     if (rafRef.current) return;
@@ -696,13 +771,46 @@ export function Board({ noteId }: { noteId: string }) {
     return () => window.removeEventListener("resize", onResize);
   }, [requestDraw]);
 
-  /* ---------------- Selection Operations ---------------- */
+  /* ---------------- Selection & Clipboard Operations ---------------- */
   const deleteSelection = useCallback(() => {
     if (selectionRef.current.size === 0) return;
     const next = strokesRef.current.filter((s) => !selectionRef.current.has(s.id));
     selectionRef.current.clear();
     setHasSelection(false);
     commit(next);
+  }, [commit]);
+
+  const copySelection = useCallback(() => {
+    const sel = selectionRef.current;
+    if (sel.size === 0) return;
+    const selected = strokesRef.current.filter((s) => sel.has(s.id));
+    clipboardRef.current = selected.map((s) => JSON.parse(JSON.stringify(s)));
+  }, []);
+
+  const cutSelection = useCallback(() => {
+    const sel = selectionRef.current;
+    if (sel.size === 0) return;
+    copySelection();
+    deleteSelection();
+  }, [copySelection, deleteSelection]);
+
+  const pasteSelection = useCallback(() => {
+    if (clipboardRef.current.length === 0) return;
+    const offset = 24 / camRef.current.k;
+    const pasted: Stroke[] = [];
+    const newSel = new Set<string>();
+
+    for (const s of clipboardRef.current) {
+      const copy = translateStroke(s, offset, offset);
+      copy.id = uid();
+      pasted.push(copy);
+      newSel.add(copy.id);
+    }
+    // Advance clipboard offset for successive pastes
+    clipboardRef.current = pasted.map((s) => JSON.parse(JSON.stringify(s)));
+    selectionRef.current = newSel;
+    setHasSelection(true);
+    commit([...strokesRef.current, ...pasted]);
   }, [commit]);
 
   const duplicateSelection = useCallback(() => {
@@ -812,6 +920,21 @@ export function Board({ noteId }: { noteId: string }) {
         jump(e.shiftKey ? 1 : -1);
         return;
       }
+      if (mod && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        copySelection();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "x") {
+        e.preventDefault();
+        cutSelection();
+        return;
+      }
+      if (mod && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        pasteSelection();
+        return;
+      }
       if (mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         duplicateSelection();
@@ -833,7 +956,29 @@ export function Board({ noteId }: { noteId: string }) {
         return;
       }
       if (e.key === "Escape") {
+        setShowShortcutsModal(false);
+        setIsZenMode(false);
         deselect();
+        return;
+      }
+      if (e.key === "?" || e.key === "/") {
+        e.preventDefault();
+        setShowShortcutsModal((v) => !v);
+        return;
+      }
+      if (e.key === "f" || e.key === "F") {
+        if (!mod) {
+          e.preventDefault();
+          fitView();
+          return;
+        }
+      }
+      if (e.key === "[") {
+        setSize((s) => Math.max(1, s - 1));
+        return;
+      }
+      if (e.key === "]") {
+        setSize((s) => Math.min(64, s + 1));
         return;
       }
 
@@ -844,13 +989,24 @@ export function Board({ noteId }: { noteId: string }) {
         h: "hand",
         v: "hand",
         s: "shape",
+        k: "laser",
       };
       const t = map[e.key.toLowerCase()];
       if (t) setTool(t);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [jump, deleteSelection, duplicateSelection, deselect, requestDraw]);
+  }, [
+    jump,
+    deleteSelection,
+    duplicateSelection,
+    copySelection,
+    cutSelection,
+    pasteSelection,
+    deselect,
+    requestDraw,
+    fitView,
+  ]);
 
   /* ---------------- Pointer / Drawing State Machine ---------------- */
   const localPoint = (e: React.PointerEvent) => {
@@ -904,7 +1060,11 @@ export function Board({ noteId }: { noteId: string }) {
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    el.setPointerCapture(e.pointerId);
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // Safe pointer capture fallback
+    }
     const { x, y } = localPoint(e);
     pointersRef.current.set(e.pointerId, { x, y });
     mousePosRef.current = { x, y };
@@ -932,9 +1092,25 @@ export function Board({ noteId }: { noteId: string }) {
     const middle = e.button === 1;
     const activeTool = toolRef.current;
 
+    // PALM REJECTION (STYLUS-ONLY MODE):
+    // When enabled, touch pointers (fingers / resting palm) will only pan the viewport,
+    // guaranteeing no accidental drawings or ink smudges from fingers.
+    if (stylusOnlyRef.current && e.pointerType === "touch") {
+      gestureRef.current = { mode: "pan", id: e.pointerId, lastX: x, lastY: y };
+      return;
+    }
+
     // Hand / Pan navigation
     if (activeTool === "hand" || middle || (e.pointerType === "mouse" && e.shiftKey)) {
       gestureRef.current = { mode: "pan", id: e.pointerId, lastX: x, lastY: y };
+      return;
+    }
+
+    // Laser pointer presentation tool
+    if (activeTool === "laser") {
+      laserPtsRef.current.push({ x: world.x, y: world.y, t: performance.now() });
+      gestureRef.current = { mode: "laser", id: e.pointerId };
+      requestDraw();
       return;
     }
 
@@ -1056,7 +1232,7 @@ export function Board({ noteId }: { noteId: string }) {
       return;
     }
 
-    // Pen Tool
+    // Pen Tool (Full Stylus sub-pixel pressure and coalesced events)
     const pressure = e.pointerType === "pen" ? clamp(e.pressure || 0.5, 0.15, 1) : 0.7;
     const style = penStyleRef.current;
     liveRef.current = {
@@ -1298,6 +1474,16 @@ export function Board({ noteId }: { noteId: string }) {
       return;
     }
 
+    // Laser Move
+    if (
+      g.mode === "laser" ||
+      (toolRef.current === "laser" && pointersRef.current.has(e.pointerId))
+    ) {
+      laserPtsRef.current.push({ x: world.x, y: world.y, t: performance.now() });
+      requestDraw();
+      return;
+    }
+
     // Pen Draw
     if (g.mode === "draw") {
       const live = liveRef.current;
@@ -1338,6 +1524,12 @@ export function Board({ noteId }: { noteId: string }) {
     }
     if (g.mode === "none" || g.id !== e.pointerId) return;
     gestureRef.current = { mode: "none" };
+
+    // Finalize Laser
+    if (g.mode === "laser") {
+      requestDraw();
+      return;
+    }
 
     // Finalize Pen Drawing
     if (g.mode === "draw") {
@@ -1612,6 +1804,8 @@ export function Board({ noteId }: { noteId: string }) {
         setShapeType={setShapeType}
         autoSnapShape={autoSnapShape}
         setAutoSnapShape={setAutoSnapShape}
+        stylusOnly={stylusOnly}
+        setStylusOnly={handleSetStylusOnly}
         brush={brush}
         setBrush={setBrush}
         size={size}
@@ -1622,8 +1816,12 @@ export function Board({ noteId }: { noteId: string }) {
         setTheme={setTheme}
         pattern={pattern}
         setPattern={setPattern}
+        gridDensity={gridDensity}
+        setGridDensity={handleSetGridDensity}
         zoom={zoom}
         setZoomLevel={setZoomLevel}
+        isZenMode={isZenMode}
+        setIsZenMode={setIsZenMode}
         canUndo={canUndo}
         canRedo={canRedo}
         hasSelection={hasSelection}
@@ -1631,6 +1829,8 @@ export function Board({ noteId }: { noteId: string }) {
         onRedo={() => jump(1)}
         onDeleteSelection={deleteSelection}
         onDuplicateSelection={duplicateSelection}
+        onCopySelection={copySelection}
+        onCutSelection={cutSelection}
         onRecolorSelection={recolorSelection}
         onThickenSelection={thickenSelection}
         onFlipSelection={flipSelection}
@@ -1652,7 +1852,11 @@ export function Board({ noteId }: { noteId: string }) {
           }
         }}
         onExportImage={exportImage}
+        onOpenShortcuts={() => setShowShortcutsModal(true)}
       />
+
+      {/* Keyboard Shortcuts Reference Dialog */}
+      <ShortcutsModal open={showShortcutsModal} onClose={() => setShowShortcutsModal(false)} />
     </div>
   );
 }

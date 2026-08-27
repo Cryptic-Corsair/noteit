@@ -42,6 +42,7 @@ function safeRead(): Note[] {
         updatedAt: Date.now(),
         favorite: false,
         theme: data.theme ?? "graphite",
+        pattern: "dots",
         cam: data.cam ?? { x: 0, y: 0, k: 1 },
         strokes: Array.isArray(data.strokes) ? data.strokes : [],
       };
@@ -82,7 +83,11 @@ export function getNote(id: string): Note | null {
   return safeRead().find((n) => n.id === id) ?? null;
 }
 
-export function createNote(title = "Untitled note", theme: ThemeId = "graphite"): Note {
+export function createNote(
+  title = "Untitled note",
+  theme: ThemeId = "graphite",
+  pattern: PaperPatternId = "dots",
+): Note {
   const note: Note = {
     id: uid(),
     title,
@@ -90,6 +95,7 @@ export function createNote(title = "Untitled note", theme: ThemeId = "graphite")
     updatedAt: Date.now(),
     favorite: false,
     theme,
+    pattern,
     cam: { x: 0, y: 0, k: 1 },
     strokes: [],
   };
@@ -109,18 +115,64 @@ export function deleteNote(id: string) {
   writeAll(safeRead().filter((n) => n.id !== id));
 }
 
-export function duplicateNote(id: string) {
+export function duplicateNote(id: string): Note | null {
   const src = safeRead().find((n) => n.id === id);
-  if (!src) return;
+  if (!src) return null;
   const copy: Note = {
     ...src,
     id: uid(),
-    title: `${src.title} copy`,
+    title: `${src.title || "Untitled"} (Copy)`,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     favorite: false,
   };
   writeAll([copy, ...safeRead()]);
+  return copy;
+}
+
+export function batchDeleteNotes(ids: string[]) {
+  const set = new Set(ids);
+  writeAll(safeRead().filter((n) => !set.has(n.id)));
+}
+
+export function batchFavoriteNotes(ids: string[], favorite: boolean) {
+  const set = new Set(ids);
+  const notes = safeRead().map((n) => (set.has(n.id) ? { ...n, favorite } : n));
+  writeAll(notes);
+}
+
+export function exportNoteAsJson(id: string) {
+  const note = getNote(id);
+  if (!note) return;
+  const blob = new Blob([JSON.stringify(note, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${(note.title || "note").toLowerCase().replace(/[^a-z0-9]+/g, "-")}.inkwell.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function importNoteFromJson(jsonString: string): Note | null {
+  try {
+    const data = JSON.parse(jsonString);
+    if (!data || typeof data !== "object") return null;
+    const note: Note = {
+      id: uid(),
+      title: typeof data.title === "string" ? `${data.title} (Imported)` : "Imported note",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      favorite: false,
+      theme: data.theme || "graphite",
+      pattern: data.pattern || "dots",
+      cam: data.cam || { x: 0, y: 0, k: 1 },
+      strokes: Array.isArray(data.strokes) ? data.strokes : [],
+    };
+    writeAll([note, ...safeRead()]);
+    return note;
+  } catch {
+    return null;
+  }
 }
 
 /** Latest strokes for a note, used to render thumbnails. */

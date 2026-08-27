@@ -6,13 +6,13 @@ import { getNote } from "@/lib/notes";
 export const Route = createFileRoute("/note/$id")({
   head: () => ({
     meta: [
-      { title: "Canvas — Inkwell" },
+      { title: "Canvas — NOTE_IT" },
       {
         name: "description",
         content:
-          "Write and sketch on an infinite Inkwell canvas with a pressure pen, eraser, lasso and gradient inks.",
+          "Write and sketch on an infinite NOTE_IT canvas with a pressure pen, eraser, lasso and gradient inks.",
       },
-      { property: "og:title", content: "Canvas — Inkwell" },
+      { property: "og:title", content: "Canvas — NOTE_IT" },
       {
         property: "og:description",
         content: "Infinite canvas note with pen, eraser, lasso and custom gradient inks.",

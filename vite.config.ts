@@ -7,9 +7,7 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 const isVercel = Boolean(
-  process.env.VERCEL ||
-    process.env.VERCEL_ENV ||
-    process.env.NITRO_PRESET === "vercel"
+  process.env.VERCEL || process.env.VERCEL_ENV || process.env.NITRO_PRESET === "vercel",
 );
 
 export default defineConfig({
