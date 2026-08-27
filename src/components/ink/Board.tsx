@@ -1822,7 +1822,7 @@ export function Board({ noteId }: { noteId: string }) {
         pattern={pattern}
         setPattern={setPattern}
         gridDensity={gridDensity}
-        setGridDensity={handleSetGridDensity}
+        setGridDensity={setGridDensity}
         zoom={zoom}
         setZoomLevel={setZoomLevel}
         isZenMode={isZenMode}
