@@ -176,11 +176,14 @@ export function Toolbar(p: Props) {
   );
   const [recentColors, setRecentColors] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem("inkwell_recent_colors");
-      return saved ? JSON.parse(saved) : ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
+      if (typeof window !== "undefined") {
+        const saved = localStorage.getItem("inkwell_recent_colors");
+        return saved ? JSON.parse(saved) : ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
+      }
     } catch {
-      return ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
+      // ignore
     }
+    return ["#111318", "#6366f1", "#ec4899", "#22c55e", "#f59e0b"];
   });
 
   const addRecentColor = (color: string) => {
@@ -188,7 +191,9 @@ export function Toolbar(p: Props) {
       const filtered = prev.filter((c) => c.toLowerCase() !== color.toLowerCase());
       const next = [color, ...filtered].slice(0, 8);
       try {
-        localStorage.setItem("inkwell_recent_colors", JSON.stringify(next));
+        if (typeof window !== "undefined") {
+          localStorage.setItem("inkwell_recent_colors", JSON.stringify(next));
+        }
       } catch {
         // ignore
       }

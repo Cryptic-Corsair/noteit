@@ -116,10 +116,13 @@ export function Board({ noteId }: { noteId: string }) {
   const [autoSnapShape, setAutoSnapShape] = useState(false);
   const [stylusOnly, setStylusOnly] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("inkwell_stylus_only") === "true";
+      if (typeof window !== "undefined") {
+        return localStorage.getItem("inkwell_stylus_only") === "true";
+      }
     } catch {
-      return false;
+      // ignore
     }
+    return false;
   });
 
   // Style & Canvas states
@@ -171,7 +174,9 @@ export function Board({ noteId }: { noteId: string }) {
   const handleSetStylusOnly = (val: boolean) => {
     setStylusOnly(val);
     try {
-      localStorage.setItem("inkwell_stylus_only", String(val));
+      if (typeof window !== "undefined") {
+        localStorage.setItem("inkwell_stylus_only", String(val));
+      }
     } catch {
       // ignore
     }
