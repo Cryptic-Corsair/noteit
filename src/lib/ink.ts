@@ -200,8 +200,234 @@ export function strokeInRect(s: Stroke, r: { x0: number; y0: number; x1: number;
   return s.pts.some((p) => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY);
 }
 
-/* ---------------- Precision Eraser (Path Trimming / Splitting) ---------------- */
+export type EraserPt = { x: number; y: number; p: number; r: number };
 
+/* ---------------- Recreated Eraser Engine (Capsule Intersection & Precision Splitting) ---------------- */
+
+/**
+ * Check if a stroke is intersected by an eraser capsule from (x0, y0, r0) to (x1, y1, r1).
+ */
+export function strokeIntersectsEraserSegment(
+  s: Stroke,
+  x0: number,
+  y0: number,
+  r0: number,
+  x1: number,
+  y1: number,
+  r1: number,
+): boolean {
+  const maxR = Math.max(r0, r1) + s.width / 2;
+  const minX = Math.min(x0, x1) - maxR;
+  const maxX = Math.max(x0, x1) + maxR;
+  const minY = Math.min(y0, y1) - maxR;
+  const maxY = Math.max(y0, y1) + maxR;
+
+  // Bounding box rejection
+  if (minX > s.bounds.x1 || maxX < s.bounds.x0 || minY > s.bounds.y1 || maxY < s.bounds.y0) {
+    return false;
+  }
+
+  const ex = x1 - x0;
+  const ey = y1 - y0;
+  const eLenSq = ex * ex + ey * ey;
+  const pts = s.pts;
+  if (pts.length === 0) return false;
+
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]!;
+    let t = eLenSq === 0 ? 0 : ((p.x - x0) * ex + (p.y - y0) * ey) / eLenSq;
+    t = clamp(t, 0, 1);
+    const cx = x0 + t * ex;
+    const cy = y0 + t * ey;
+    const effR = r0 + t * (r1 - r0) + s.width * 0.45;
+    const dSq = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+    if (dSq <= effR * effR) return true;
+
+    // Check segment to next point if segment is longer than eraser radius
+    if (i < pts.length - 1) {
+      const pNext = pts[i + 1]!;
+      const segLen = Math.hypot(pNext.x - p.x, pNext.y - p.y);
+      if (segLen > Math.max(2, effR * 0.6)) {
+        const steps = Math.ceil(segLen / Math.max(2, effR * 0.5));
+        for (let step = 1; step < steps; step++) {
+          const st = step / steps;
+          const sx = p.x + st * (pNext.x - p.x);
+          const sy = p.y + st * (pNext.y - p.y);
+          let et = eLenSq === 0 ? 0 : ((sx - x0) * ex + (sy - y0) * ey) / eLenSq;
+          et = clamp(et, 0, 1);
+          const ecx = x0 + et * ex;
+          const ecy = y0 + et * ey;
+          const eR = r0 + et * (r1 - r0) + s.width * 0.45;
+          if ((sx - ecx) ** 2 + (sy - ecy) ** 2 <= eR * eR) return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Smoothly cut and split a stroke using an eraser capsule from (x0, y0, r0) to (x1, y1, r1).
+ * Finds clean boundary entry and exit points so strokes terminate cleanly at the eraser circumference.
+ */
+export function splitStrokeByEraserSegment(
+  s: Stroke,
+  x0: number,
+  y0: number,
+  r0: number,
+  x1: number,
+  y1: number,
+  r1: number,
+): Stroke[] {
+  const maxR = Math.max(r0, r1) + s.width / 2;
+  const minX = Math.min(x0, x1) - maxR;
+  const maxX = Math.max(x0, x1) + maxR;
+  const minY = Math.min(y0, y1) - maxR;
+  const maxY = Math.max(y0, y1) + maxR;
+
+  // Quick bounding box check
+  if (minX > s.bounds.x1 || maxX < s.bounds.x0 || minY > s.bounds.y1 || maxY < s.bounds.y0) {
+    return [s];
+  }
+
+  const ex = x1 - x0;
+  const ey = y1 - y0;
+  const eLenSq = ex * ex + ey * ey;
+
+  const isInside = (x: number, y: number): { inside: boolean; effR: number } => {
+    let t = eLenSq === 0 ? 0 : ((x - x0) * ex + (y - y0) * ey) / eLenSq;
+    t = clamp(t, 0, 1);
+    const cx = x0 + t * ex;
+    const cy = y0 + t * ey;
+    const effR = r0 + t * (r1 - r0) + s.width * 0.35;
+    const distSq = (x - cx) ** 2 + (y - cy) ** 2;
+    return { inside: distSq <= effR * effR, effR };
+  };
+
+  const findBoundary = (pA: Pt, pB: Pt, aInside: boolean): Pt => {
+    let low = 0;
+    let high = 1;
+    for (let iter = 0; iter < 4; iter++) {
+      const mid = (low + high) / 2;
+      const mx = pA.x + mid * (pB.x - pA.x);
+      const my = pA.y + mid * (pB.y - pA.y);
+      const { inside } = isInside(mx, my);
+      if (inside === aInside) {
+        low = mid;
+      } else {
+        high = mid;
+      }
+    }
+    const t = (low + high) / 2;
+    return {
+      x: pA.x + t * (pB.x - pA.x),
+      y: pA.y + t * (pB.y - pA.y),
+      p: pA.p + t * (pB.p - pA.p),
+    };
+  };
+
+  const pieces: Pt[][] = [];
+  let currentPiece: Pt[] = [];
+  let anyErased = false;
+
+  const pts = s.pts;
+  if (pts.length === 0) return [];
+
+  let prevPt = pts[0]!;
+  let prevInside = isInside(prevPt.x, prevPt.y).inside;
+
+  if (!prevInside) {
+    currentPiece.push(prevPt);
+  } else {
+    anyErased = true;
+  }
+
+  for (let i = 1; i < pts.length; i++) {
+    const curPt = pts[i]!;
+    const curInside = isInside(curPt.x, curPt.y).inside;
+
+    if (!prevInside && !curInside) {
+      // Check if long segment pierced through eraser
+      const segLen = Math.hypot(curPt.x - prevPt.x, curPt.y - prevPt.y);
+      if (segLen > 4) {
+        const steps = Math.ceil(segLen / 3);
+        let pierced = false;
+        for (let st = 1; st < steps; st++) {
+          const ratio = st / steps;
+          const testX = prevPt.x + ratio * (curPt.x - prevPt.x);
+          const testY = prevPt.y + ratio * (curPt.y - prevPt.y);
+          if (isInside(testX, testY).inside) {
+            pierced = true;
+            break;
+          }
+        }
+        if (pierced) {
+          anyErased = true;
+          const entry = findBoundary(prevPt, curPt, false);
+          currentPiece.push(entry);
+          if (currentPiece.length > 0) pieces.push(currentPiece);
+          const exit = findBoundary(curPt, prevPt, false);
+          currentPiece = [exit, curPt];
+          prevPt = curPt;
+          prevInside = curInside;
+          continue;
+        }
+      }
+      currentPiece.push(curPt);
+    } else if (!prevInside && curInside) {
+      // Moving from outside to inside eraser
+      anyErased = true;
+      const bound = findBoundary(prevPt, curPt, false);
+      currentPiece.push(bound);
+      if (currentPiece.length > 0) {
+        pieces.push(currentPiece);
+        currentPiece = [];
+      }
+    } else if (prevInside && !curInside) {
+      // Moving from inside to outside eraser
+      anyErased = true;
+      const bound = findBoundary(prevPt, curPt, true);
+      currentPiece = [bound, curPt];
+    } else {
+      // Inside eraser
+      anyErased = true;
+    }
+
+    prevPt = curPt;
+    prevInside = curInside;
+  }
+
+  if (currentPiece.length > 0) {
+    pieces.push(currentPiece);
+  }
+
+  if (!anyErased) {
+    return [s];
+  }
+
+  const validPieces = pieces.filter((pList) => {
+    if (pList.length < 2) return false;
+    let len = 0;
+    for (let j = 0; j < pList.length - 1; j++) {
+      len += Math.hypot(pList[j + 1]!.x - pList[j]!.x, pList[j + 1]!.y - pList[j]!.y);
+      if (len >= 1.5) return true;
+    }
+    return len >= 1.5;
+  });
+
+  return validPieces.map((pList) => ({
+    id: uid(),
+    pts: pList,
+    width: s.width,
+    brush: s.brush,
+    style: s.style,
+    opacity: s.opacity,
+    bounds: computeBounds(pList),
+  }));
+}
+
+/** Legacy alias for backwards compatibility */
 export function splitStrokeByCapsule(
   s: Stroke,
   ex0: number,
@@ -210,52 +436,7 @@ export function splitStrokeByCapsule(
   ey1: number,
   r: number,
 ): Stroke[] {
-  const pad = r + s.width / 2;
-  const minEx = Math.min(ex0, ex1) - pad;
-  const maxEx = Math.max(ex0, ex1) + pad;
-  const minEy = Math.min(ey0, ey1) - pad;
-  const maxEy = Math.max(ey0, ey1) + pad;
-
-  if (minEx > s.bounds.x1 || maxEx < s.bounds.x0 || minEy > s.bounds.y1 || maxEy < s.bounds.y0) {
-    return [s]; // no intersection
-  }
-
-  const rSq = (r + s.width / 4) ** 2;
-  const pieces: Pt[][] = [];
-  let currentPiece: Pt[] = [];
-
-  for (let i = 0; i < s.pts.length; i++) {
-    const p = s.pts[i]!;
-    const dSq = distSqToSeg(p.x, p.y, { x: ex0, y: ey0, p: 0 }, { x: ex1, y: ey1, p: 0 });
-    if (dSq > rSq) {
-      currentPiece.push(p);
-    } else {
-      if (currentPiece.length > 0) {
-        pieces.push(currentPiece);
-        currentPiece = [];
-      }
-    }
-  }
-  if (currentPiece.length > 0) {
-    pieces.push(currentPiece);
-  }
-
-  // Filter out tiny disconnected residue dots (< 2 pts and span < 2px)
-  const validPieces = pieces.filter((pts) => pts.length >= 2);
-
-  if (validPieces.length === 1 && validPieces[0]!.length === s.pts.length) {
-    return [s];
-  }
-
-  return validPieces.map((pts) => ({
-    id: uid(),
-    pts,
-    width: s.width,
-    brush: s.brush,
-    style: s.style,
-    opacity: s.opacity,
-    bounds: computeBounds(pts),
-  }));
+  return splitStrokeByEraserSegment(s, ex0, ey0, r, ex1, ey1, r);
 }
 
 /* ---------------- Transforms (Move, Scale, Rotate, Flip, Recolor) ---------------- */

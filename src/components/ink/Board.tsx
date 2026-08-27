@@ -14,6 +14,8 @@ import {
   scaleStroke,
   shouldAddPoint,
   splitStrokeByCapsule,
+  splitStrokeByEraserSegment,
+  strokeIntersectsEraserSegment,
   strokeInLasso,
   strokeInRect,
   strokePath,
@@ -23,6 +25,7 @@ import {
   uid,
   type Brush,
   type Camera,
+  type EraserPt,
   type Pt,
   type Stroke,
   type StrokeStyle,
@@ -56,6 +59,7 @@ export function Board({ noteId }: { noteId: string }) {
   const strokesRef = useRef<Stroke[]>([]);
   const camRef = useRef<Camera>({ x: 0, y: 0, k: 1 });
   const liveRef = useRef<Stroke | null>(null);
+  const eraserLastPtRef = useRef<EraserPt | null>(null);
   const shapeStartRef = useRef<Pt | null>(null);
   const lassoRef = useRef<Pt[] | null>(null);
   const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -482,18 +486,32 @@ export function Board({ noteId }: { noteId: string }) {
 
     ctx.restore();
 
-    // Draw Live Eraser Ring (Screen Space)
+    // Draw Live Eraser Ring & Precision Indicator (Screen Space)
     if (toolRef.current === "eraser" && mousePosRef.current) {
       const { x, y } = mousePosRef.current;
-      const erR = eraserSizeRef.current;
+      let erR = eraserSizeRef.current;
+      if (gestureRef.current.mode === "erase" && eraserLastPtRef.current) {
+        erR = eraserLastPtRef.current.r * cam.k;
+      }
       ctx.save();
       ctx.strokeStyle = accent;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.arc(x, y, erR, 0, Math.PI * 2);
       ctx.stroke();
-      ctx.fillStyle = "rgba(99, 102, 241, 0.08)";
+
+      ctx.fillStyle =
+        gestureRef.current.mode === "erase"
+          ? "rgba(168, 85, 247, 0.15)"
+          : "rgba(99, 102, 241, 0.08)";
       ctx.fill();
+
+      // Precision center dot
+      ctx.beginPath();
+      ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+
       ctx.restore();
     }
   }, [pattern]);
@@ -840,32 +858,23 @@ export function Board({ noteId }: { noteId: string }) {
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
-  const eraseSegment = (x0: number, y0: number, x1: number, y1: number) => {
+  const performEraseStep = (p0: EraserPt, p1: EraserPt): boolean => {
     const mode = eraserModeRef.current;
     const filter = eraserFilterRef.current;
-    const r = eraserSizeRef.current / camRef.current.k;
 
     if (mode === "stroke") {
+      const initialLen = strokesRef.current.length;
       const kept = strokesRef.current.filter((s) => {
         if (filter === "pen-only" && s.style === "highlighter") return true;
         if (filter === "highlighter-only" && s.style !== "highlighter") return true;
-
-        // Approximate capsule intersection by checking a few interpolated points
-        const count = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (r * 0.5)));
-        for (let j = 0; j <= count; j++) {
-          const t = count === 0 ? 0 : j / count;
-          const cx = x0 + (x1 - x0) * t;
-          const cy = y0 + (y1 - y0) * t;
-          if (pointNearStroke(s, cx, cy, r)) return false;
-        }
-        return true;
+        return !strokeIntersectsEraserSegment(s, p0.x, p0.y, p0.r, p1.x, p1.y, p1.r);
       });
-      if (kept.length !== strokesRef.current.length) {
+      if (kept.length !== initialLen) {
         strokesRef.current = kept;
-        requestDraw();
+        return true;
       }
+      return false;
     } else {
-      // Precision pixel segment splitting (Capsule-based)
       let changed = false;
       const next: Stroke[] = [];
       for (const s of strokesRef.current) {
@@ -877,7 +886,7 @@ export function Board({ noteId }: { noteId: string }) {
           continue;
         }
 
-        const splits = splitStrokeByCapsule(s, x0, y0, x1, y1, r);
+        const splits = splitStrokeByEraserSegment(s, p0.x, p0.y, p0.r, p1.x, p1.y, p1.r);
         if (splits.length !== 1 || splits[0] !== s) {
           changed = true;
           next.push(...splits);
@@ -887,8 +896,9 @@ export function Board({ noteId }: { noteId: string }) {
       }
       if (changed) {
         strokesRef.current = next;
-        requestDraw();
+        return true;
       }
+      return false;
     }
   };
 
@@ -1014,8 +1024,16 @@ export function Board({ noteId }: { noteId: string }) {
 
     // Eraser Tool
     if (activeTool === "eraser") {
-      gestureRef.current = { mode: "erase", id: e.pointerId, lastX: x, lastY: y };
-      eraseSegment(world.x, world.y, world.x, world.y);
+      const pressure = e.pointerType === "pen" ? clamp(e.pressure || 0.5, 0.15, 1) : 0.7;
+      const baseR = eraserSizeRef.current / camRef.current.k;
+      const r = baseR * (e.pointerType === "pen" ? 0.6 + pressure * 0.6 : 1);
+      const startPt: EraserPt = { x: world.x, y: world.y, p: pressure, r };
+
+      eraserLastPtRef.current = startPt;
+      gestureRef.current = { mode: "erase", id: e.pointerId };
+
+      performEraseStep(startPt, startPt);
+      requestDraw();
       return;
     }
 
@@ -1156,10 +1174,26 @@ export function Board({ noteId }: { noteId: string }) {
 
     // Erase
     if (g.mode === "erase") {
-      const lastW = toWorld(camRef.current, g.lastX, g.lastY);
-      eraseSegment(lastW.x, lastW.y, world.x, world.y);
-      g.lastX = x;
-      g.lastY = y;
+      const events =
+        typeof e.nativeEvent.getCoalescedEvents === "function"
+          ? e.nativeEvent.getCoalescedEvents()
+          : [e.nativeEvent];
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const baseR = eraserSizeRef.current / camRef.current.k;
+
+      for (const ev of events.length ? events : [e.nativeEvent]) {
+        const w = toWorld(camRef.current, ev.clientX - rect.left, ev.clientY - rect.top);
+        const pressure = e.pointerType === "pen" ? clamp(ev.pressure || 0.5, 0.15, 1) : 0.7;
+        const r = baseR * (e.pointerType === "pen" ? 0.6 + pressure * 0.6 : 1);
+        const pt: EraserPt = { x: w.x, y: w.y, p: pressure, r };
+
+        const lastPt = eraserLastPtRef.current ?? pt;
+        if (!eraserLastPtRef.current || shouldAddPoint(lastPt, pt, 0.8 / camRef.current.k)) {
+          eraserLastPtRef.current = pt;
+          performEraseStep(lastPt, pt);
+        }
+      }
+      requestDraw();
       return;
     }
 
@@ -1342,8 +1376,16 @@ export function Board({ noteId }: { noteId: string }) {
       return;
     }
 
-    // Finalize Erase, Move, Scale, Rotate
-    if (g.mode === "erase" || g.mode === "move" || g.mode === "scale" || g.mode === "rotate") {
+    // Finalize Erase
+    if (g.mode === "erase") {
+      eraserLastPtRef.current = null;
+      commit([...strokesRef.current]);
+      requestDraw();
+      return;
+    }
+
+    // Finalize Move, Scale, Rotate
+    if (g.mode === "move" || g.mode === "scale" || g.mode === "rotate") {
       commit([...strokesRef.current]);
       return;
     }
